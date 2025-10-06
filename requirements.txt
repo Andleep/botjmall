@@ -1,6 +1,0 @@
-pandas
-numpy
-TA-Lib
-python-binance
-streamlit
-plotly
