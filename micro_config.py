@@ -6,19 +6,27 @@ BINANCE_CONFIG = {
 }
 
 MICRO_CONFIG = {
-    "initial_balance": 10.0,           # رأس المال الابتدائي
-    "selected_pairs": ["BTCUSDT", "ETHUSDT", "BNBUSDT"],  # 3 أزواج للبداية
-    "base_risk": 0.04,                 # 4% مخاطرة أساسية
-    "max_risk": 0.08,                  # 8% أقصى مخاطرة
-    "min_risk": 0.015,                 # 1.5% أدنى مخاطرة
-    "min_trade": 0.50,                 # 50 سنت أقل صفقة
-    "max_trade": 3.00,                 # 3 دولار أقصى صفقة
-    "confidence_threshold": 65,        # 65% ثقة أدنى
-    "timeframe": "1m",                 # إطار دقيقة واحدة
-    "max_trades_per_day": 300,         # 300 صفقة يومياً كحد أقصى
-    "compounding_mode": "INSTANT",     # ربح تراكمي فوري
-    "risk_multiplier_win": 1.3,        # زيادة المخاطرة بعد الربح
-    "risk_multiplier_loss": 0.7,       # تقليل المخاطرة بعد الخسارة
-    "adaptive_learning": True,         # تفعيل التعلم التكيفي
-    "fast_calculation": True           # حسابات سريعة
+    "initial_balance": 10.0,
+    "selected_pairs": ["BTCUSDT", "ETHUSDT", "BNBUSDT"],
+    
+    # 🔥 إصلاح إدارة المخاطر
+    "base_risk": 0.02,                 # 2% فقط للرؤوس الصغيرة
+    "max_risk": 0.04,                  # 4% أقصى حد
+    "min_risk": 0.008,                 # 0.8% أدنى حد
+    "min_trade": 1.00,                 # 1$ حد أدنى (بدلاً من 0.50$)
+    "max_trade": 2.00,                 # 2$ حد أقصى
+    
+    # 🔥 إصلاح قرارات التداول
+    "confidence_threshold": 75,        # 75% ثقة أدنى (زيادة الدقة)
+    "min_profit_target": 0.003,        # 0.3% أقل ربح مستهدف
+    "max_stop_loss": 0.015,            # 1.5% أقصى خسارة للصفقة
+    
+    "timeframe": "3m",                 # 3 دقائق أفضل من 1m
+    "max_trades_per_day": 200,
+    "compounding_mode": "INSTANT",
+    
+    # 🔥 إضافة حماية جديدة
+    "daily_loss_limit": 0.20,          # 20% أقصى خسارة يومية
+    "consecutive_loss_limit": 3,       # توقف بعد 3 خسائر متتالية
+    "profit_lock_in": 0.10,            # تأمين 10% ربح عند تحقيقها
 }
