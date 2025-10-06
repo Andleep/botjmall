@@ -27,13 +27,28 @@ class AdvancedLorentzianBot:
             df[c] = pd.to_numeric(df[c], errors='coerce')
         df['hlc3'] = (df['high']+df['low']+df['close'])/3.0
         # indicators
-        df['ema50'] = talib.EMA(df['close'].values, timeperiod=50)
+        try:
+            df['ema50'] = talib.EMA(df['close'].values, timeperiod=50)
+        except:
+            df['ema50'] = df['close']
         macd, macdsig, macdhist = talib.MACD(df['close'].values, fastperiod=12, slowperiod=26, signalperiod=9)
         df['macdh'] = macdhist
-        df['adx'] = talib.ADX(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)
-        df['atr'] = talib.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)
-        df['rsi'] = talib.RSI(df['close'].values, timeperiod=14)
-        df['cci'] = talib.CCI(df['high'].values, df['low'].values, df['close'].values, timeperiod=20)
+        try:
+            df['adx'] = talib.ADX(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)
+        except:
+            df['adx'] = 0.0
+        try:
+            df['atr'] = talib.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)
+        except:
+            df['atr'] = 0.0
+        try:
+            df['rsi'] = talib.RSI(df['close'].values, timeperiod=14)
+        except:
+            df['rsi'] = 50.0
+        try:
+            df['cci'] = talib.CCI(df['high'].values, df['low'].values, df['close'].values, timeperiod=20)
+        except:
+            df['cci'] = 0.0
         # wave trend approx
         try:
             esa = talib.EMA(df['hlc3'].values, timeperiod=10)
@@ -47,7 +62,6 @@ class AdvancedLorentzianBot:
         return df
 
     def lorentzian_score(self, features_cur: List[float], hist_feats: List[List[float]]) -> float:
-        # vectorized simplified lorentzian distance -> score
         if len(hist_feats) == 0:
             return 0.0
         d = np.array([np.sum(np.log1p(np.abs(np.array(features_cur) - np.array(h)))) for h in hist_feats])
@@ -55,15 +69,13 @@ class AdvancedLorentzianBot:
         return 1.0/(1.0+median)
 
     def kelly_fraction(self, win_rate: float, avg_win: float, avg_loss: float) -> float:
-        # Kelly (fraction) = W - (1-W)/R where R = avg_win/abs(avg_loss)
         if avg_loss == 0:
             return 0.0
         R = avg_win / abs(avg_loss) if avg_loss != 0 else 0
         k = win_rate - (1-win_rate)/R if R>0 else 0.0
-        return max(0.0, min(k, 0.5))  # cap to 50% to avoid extremes
+        return max(0.0, min(k, 0.5))
 
     def compute_position_size(self, balance: float, risk_per_trade: float, kelly_frac: float, price: float, min_amount: float):
-        # mix fixed-fraction risk and Kelly: size = balance*(risk_per_trade*(1 - alpha) + kelly_frac*alpha)
         alpha = float(self.config.get('kelly_weight', 0.6))
         frac = risk_per_trade*(1-alpha) + kelly_frac*alpha
         trade_amt = max(min_amount, min(balance * frac, balance*0.5))
@@ -71,10 +83,6 @@ class AdvancedLorentzianBot:
         return trade_amt, qty
 
     def simulate(self, klines: pd.DataFrame, symbol: str, params: Dict) -> Dict:
-        """
-        params: dict with strategy params: score_th, adx_th, tp_pct, sl_pct, risk_per_trade, commission, slippage, lookback
-        returns performance dict
-        """
         df = self.prepare(klines)
         n = len(df)
         self.reset_state()
@@ -83,26 +91,24 @@ class AdvancedLorentzianBot:
         tp_pct = params.get('tp_pct', 0.03)
         sl_pct = params.get('sl_pct', 0.015)
         risk_per_trade = params.get('risk_per_trade', 0.05)
-        commission = params.get('commission', 0.0008)   # 0.08%
-        slippage = params.get('slippage', 0.0005)       # 0.05%
+        commission = params.get('commission', 0.0008)
+        slippage = params.get('slippage', 0.0005)
         lookback = params.get('lookback', 500)
         min_amount = params.get('min_amount', 0.01)
 
-        # naive historical stats for Kelly:
         wins = []
         losses = []
 
         for i in range(n):
             row = df.iloc[i]
             price = float(row['close'])
-            # check existing positions TP/SL intra-bar
+            # check TP/SL intra-bar
             cur_pos = self.positions.get(symbol, [])
             closed_this_bar = False
             for pos in list(cur_pos):
                 entry = pos['entry_price']
                 tp_price = entry*(1+tp_pct)
                 sl_price = entry*(1-sl_pct)
-                # account for slippage: assume fill price hits tp/sl +/- slippage
                 if row['high'] >= tp_price:
                     fill = tp_price*(1 - slippage)
                     profit = (fill - entry)*pos['qty'] - pos['amount']*commission
@@ -126,46 +132,40 @@ class AdvancedLorentzianBot:
                     self.positions[symbol] = cur_pos
                 else:
                     self.positions.pop(symbol, None)
-                # immediately continue to next loop allowing re-entry using updated balance
+            if i < 5: 
+                # need small warmup
+                self.equity_curve.append(self.balance)
+                continue
 
-            # prepare features for scoring
-            if i < 5: continue
             start = max(0, i - lookback)
             subset = df.iloc[start:i]
             hist_feats = []
             for _, r in subset.iterrows():
-                hist_feats.append([r['rsi'], r['wt'] if 'wt' in r else 0.0, r['cci'], r['adx'], r['macdh']])
-            cur_feats = [row['rsi'], row.get('wt',0.0), row['cci'], row['adx'], row['macdh']]
+                hist_feats.append([r['rsi'], r.get('wt',0.0), r['cci'], r.get('adx',0.0), r.get('macdh',0.0)])
+            cur_feats = [row.get('rsi',50.0), row.get('wt',0.0), row.get('cci',0.0), row.get('adx',0.0), row.get('macdh',0.0)]
             score = self.lorentzian_score(cur_feats, hist_feats)
 
-            # signal: composite with MACD momentum and ADX
-            is_up = row['close'] > row['ema50'] and row['macdh'] > 0 and row['adx'] > adx_th
-            is_down = row['close'] < row['ema50'] and row['macdh'] < 0 and row['adx'] > adx_th
-
-            # determine kelly fraction from historical wins/losses
+            is_up = row['close'] > row['ema50'] and row.get('macdh',0.0) > 0 and row.get('adx',0.0) > adx_th
+            # compute kelly
             avg_win = np.mean(wins) if len(wins)>0 else 0.0
             avg_loss = np.mean(losses) if len(losses)>0 else 0.0
             win_rate = (np.sum(np.array(wins)>0)/len(wins)) if len(wins)>0 else 0.5
             kelly = self.kelly_fraction(win_rate, avg_win, avg_loss) if len(wins)+len(losses)>5 else 0.0
 
-            # enter long
             if score > score_th and is_up:
-                # compute position size
                 trade_amt, qty = self.compute_position_size(self.balance, risk_per_trade, kelly, price, min_amount)
-                if trade_amt <= 0 or trade_amt > self.balance: 
+                if trade_amt <= 0 or trade_amt > self.balance:
+                    self.equity_curve.append(self.balance)
                     continue
-                # simulate opening (deduct amount)
                 self.balance -= trade_amt
                 pos = {'entry_time': df.index[i], 'entry_price': price*(1+slippage), 'qty': qty, 'amount': trade_amt}
                 self.positions.setdefault(symbol, []).append(pos)
                 self.trade_history.append({'timestamp': df.index[i], 'action':'BUY','price':pos['entry_price'],'amount':trade_amt})
-            # enter short (we handle only long in this simple version)
-            # optional: implement shorting with margin/leverage
+            # snapshot equity
+            unreal = sum([(row['close'] - p['entry_price'])*p['qty'] + p['amount'] for p in self.positions.get(symbol,[])])
+            self.equity_curve.append(self.balance + unreal)
 
-            # equity snapshot after processing bar
-            self.equity_curve.append(self.balance + sum([(p['amount'] + (row['close']-p['entry_price'])*p['qty']) for p in self.positions.get(symbol,[])]))
-
-        # final close of any positions at last price
+        # final close
         if self.positions.get(symbol):
             last_price = float(df['close'].iloc[-1])
             for pos in list(self.positions[symbol]):
@@ -175,7 +175,6 @@ class AdvancedLorentzianBot:
                 self.trade_history.append({'timestamp': df.index[-1], 'action':'CLOSE','price':fill,'profit':profit,'amount':pos['amount']})
             self.positions.pop(symbol, None)
 
-        # metrics
         closed = [t for t in self.trade_history if t['action'] in ('TP','SL','CLOSE')]
         profits = [t.get('profit',0) for t in closed]
         total_trades = len(closed)
@@ -184,7 +183,6 @@ class AdvancedLorentzianBot:
         win_rate = win_trades/total_trades if total_trades>0 else 0
         total_profit = sum(profits)
         final_balance = self.balance
-        # compute drawdown
         eq = np.array(self.equity_curve) if len(self.equity_curve)>0 else np.array([self.initial_balance])
         peak = -np.inf
         max_dd = 0.0
@@ -192,12 +190,9 @@ class AdvancedLorentzianBot:
             if v>peak: peak=v
             dd = (peak - v)/peak if peak>0 else 0
             if dd>max_dd: max_dd=dd
-
-        # sharpe approx on trade profits (daily not precise)
         sharpe = 0.0
         if len(profits)>1:
             sharpe = (np.mean(profits)/ (np.std(profits)+1e-9)) * sqrt(252)
-
         return {
             'final_balance': final_balance,
             'total_trades': total_trades,
@@ -209,12 +204,11 @@ class AdvancedLorentzianBot:
             'equity_curve': self.equity_curve
         }
 
-    # --- simple random search optimizer ---
     def optimize_params(self, klines: pd.DataFrame, symbol: str, n_iter:int=50):
         best = None
         for _ in range(n_iter):
             params = {
-                'score_th': 10**np.random.uniform(-5, -2),   # 1e-5 .. 1e-2
+                'score_th': 10**np.random.uniform(-5, -2),
                 'adx_th': int(np.random.choice([6,8,10,12,15])),
                 'tp_pct': float(np.random.choice([0.02,0.03,0.04,0.05])),
                 'sl_pct': float(np.random.choice([0.01,0.015,0.02,0.025])),
@@ -225,7 +219,7 @@ class AdvancedLorentzianBot:
                 'min_amount': self.config.get('min_trade_amount',0.01)
             }
             perf = self.simulate(klines, symbol, params)
-            score = perf['final_balance']  # simple objective (could use sharpe, or dd-penalized)
+            score = perf['final_balance']
             if best is None or score > best['score']:
                 best = {'score': score, 'params': params, 'perf': perf}
         return best
