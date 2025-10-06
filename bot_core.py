@@ -1,275 +1,231 @@
-# bot_core.py
+# bot_core.py  (محسّن: Lorentzian + MACD + Kelly sizing + commission/slippage + random optimizer)
 import pandas as pd
 import numpy as np
 import talib
-from datetime import datetime
 import logging
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
+from math import sqrt
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-class LorentzianStrategyBot:
-    """
-    Bot core — Lorentzian-like classifier + filters + immediate TP/SL + cumulative equity.
-    Designed for simulation (historical klines) and live-readonly demo.
-    """
-
+class AdvancedLorentzianBot:
     def __init__(self, config: Dict):
         self.config = config.copy()
         self.initial_balance = float(self.config.get("initial_balance", 10.0))
+        self.reset_state()
+
+    def reset_state(self):
         self.balance = float(self.initial_balance)
-        self.positions = {}  # symbol -> list of open positions
+        self.positions = {}      # symbol -> list of pos
         self.trade_history = []
-        self._last_entry_index = {}
+        self.equity_curve = []
 
-    def prepare_ohlcv(self, df: pd.DataFrame) -> pd.DataFrame:
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
-        for c in ["open","high","low","close","volume"]:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-        df["hlc3"] = (df["high"] + df["low"] + df["close"]) / 3.0
-        return df
-
-    def add_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
-        # EMA50 and EMA200
+        for c in ['open','high','low','close','volume']:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+        df['hlc3'] = (df['high']+df['low']+df['close'])/3.0
+        # indicators
+        df['ema50'] = talib.EMA(df['close'].values, timeperiod=50)
+        macd, macdsig, macdhist = talib.MACD(df['close'].values, fastperiod=12, slowperiod=26, signalperiod=9)
+        df['macdh'] = macdhist
+        df['adx'] = talib.ADX(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)
+        df['atr'] = talib.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)
+        df['rsi'] = talib.RSI(df['close'].values, timeperiod=14)
+        df['cci'] = talib.CCI(df['high'].values, df['low'].values, df['close'].values, timeperiod=20)
+        # wave trend approx
         try:
-            df["ema50"] = talib.EMA(df["close"].values, timeperiod=50)
-        except:
-            df["ema50"] = df["close"]
-        try:
-            df["ema200"] = talib.EMA(df["close"].values, timeperiod=200)
-        except:
-            df["ema200"] = df["close"]
-        # ADX, ATR, RSI, CCI
-        try:
-            df["adx"] = talib.ADX(df["high"].values, df["low"].values, df["close"].values, timeperiod=14)
-        except:
-            df["adx"] = 0.0
-        try:
-            df["atr"] = talib.ATR(df["high"].values, df["low"].values, df["close"].values, timeperiod=14)
-        except:
-            df["atr"] = 0.0
-        try:
-            df["rsi"] = talib.RSI(df["close"].values, timeperiod=14)
-        except:
-            df["rsi"] = 50.0
-        try:
-            df["cci"] = talib.CCI(df["high"].values, df["low"].values, df["close"].values, timeperiod=20)
-        except:
-            df["cci"] = 0.0
-        # WaveTrend approximation
-        try:
-            esa = talib.EMA(df["hlc3"].values, timeperiod=10)
-            de = talib.EMA(np.abs(df["hlc3"].values - esa), timeperiod=10)
-            ci = (df["hlc3"].values - esa) / (0.015 * de)
+            esa = talib.EMA(df['hlc3'].values, timeperiod=10)
+            de = talib.EMA(np.abs(df['hlc3'].values - esa), timeperiod=10)
+            ci = (df['hlc3'].values - esa) / (0.015 * de)
             wt1 = talib.EMA(ci, timeperiod=21)
             wt2 = talib.SMA(wt1, timeperiod=4)
-            df["wt"] = wt1 - wt2
-        except Exception:
-            df["wt"] = 0.0
-        tp = (df["high"] + df["low"] + df["close"]) / 3.0
-        df["vwap"] = (tp * df["volume"]).cumsum() / (df["volume"].cumsum() + 1e-9)
+            df['wt'] = wt1 - wt2
+        except:
+            df['wt'] = 0.0
         return df
 
-    def lorentzian_score(self, row, hist_rows) -> float:
-        # simplified lorentzian distance-based score
-        features = ["rsi","wt","cci","adx","rsi"]
-        vals = [row.get(f, 0.0) for f in features]
-        if len(hist_rows) == 0:
+    def lorentzian_score(self, features_cur: List[float], hist_feats: List[List[float]]) -> float:
+        # vectorized simplified lorentzian distance -> score
+        if len(hist_feats) == 0:
             return 0.0
-        dists = []
-        for r in hist_rows:
-            dist = 0.0
-            for i, f in enumerate(features):
-                a = vals[i] if not np.isnan(vals[i]) else 0.0
-                b = r.get(f, 0.0) if not np.isnan(r.get(f,0.0)) else 0.0
-                dist += np.log(1 + abs(a - b))
-            dists.append(dist)
-        median = np.median(dists) if len(dists) > 0 else 0.0
-        return 1.0 / (1.0 + median)
+        d = np.array([np.sum(np.log1p(np.abs(np.array(features_cur) - np.array(h)))) for h in hist_feats])
+        median = np.median(d)
+        return 1.0/(1.0+median)
 
-    def decide_signal(self, df: pd.DataFrame, idx:int) -> Tuple[str, float]:
-        row = df.iloc[idx]
-        ts = pd.to_datetime(row.name) if row.name is not None else pd.Timestamp.utcnow()
-        minute = ts.minute if hasattr(ts, "minute") else 0
+    def kelly_fraction(self, win_rate: float, avg_win: float, avg_loss: float) -> float:
+        # Kelly (fraction) = W - (1-W)/R where R = avg_win/abs(avg_loss)
+        if avg_loss == 0:
+            return 0.0
+        R = avg_win / abs(avg_loss) if avg_loss != 0 else 0
+        k = win_rate - (1-win_rate)/R if R>0 else 0.0
+        return max(0.0, min(k, 0.5))  # cap to 50% to avoid extremes
 
-        # optional time filter
-        if self.config.get("use_time_filter", False):
-            if minute in (0,1,58,59):
-                return "HOLD", 0.0
+    def compute_position_size(self, balance: float, risk_per_trade: float, kelly_frac: float, price: float, min_amount: float):
+        # mix fixed-fraction risk and Kelly: size = balance*(risk_per_trade*(1 - alpha) + kelly_frac*alpha)
+        alpha = float(self.config.get('kelly_weight', 0.6))
+        frac = risk_per_trade*(1-alpha) + kelly_frac*alpha
+        trade_amt = max(min_amount, min(balance * frac, balance*0.5))
+        qty = trade_amt / price if price>0 else 0.0
+        return trade_amt, qty
 
-        # need some history
-        if idx < 20:
-            return "HOLD", 0.0
+    def simulate(self, klines: pd.DataFrame, symbol: str, params: Dict) -> Dict:
+        """
+        params: dict with strategy params: score_th, adx_th, tp_pct, sl_pct, risk_per_trade, commission, slippage, lookback
+        returns performance dict
+        """
+        df = self.prepare(klines)
+        n = len(df)
+        self.reset_state()
+        score_th = params.get('score_th', 0.0005)
+        adx_th = params.get('adx_th', 8)
+        tp_pct = params.get('tp_pct', 0.03)
+        sl_pct = params.get('sl_pct', 0.015)
+        risk_per_trade = params.get('risk_per_trade', 0.05)
+        commission = params.get('commission', 0.0008)   # 0.08%
+        slippage = params.get('slippage', 0.0005)       # 0.05%
+        lookback = params.get('lookback', 500)
+        min_amount = params.get('min_amount', 0.01)
 
-        # Trend filter: use EMA50 for quicker trend recognition on 1m
-        is_uptrend = row["close"] > row.get("ema50", row["close"])
-        is_downtrend = row["close"] < row.get("ema50", row["close"])
+        # naive historical stats for Kelly:
+        wins = []
+        losses = []
 
-        adx_ok = row.get("adx", 0) >= int(self.config.get("adx_threshold", 8))
-        atr = row.get("atr", 0.0)
-        if np.isnan(atr) or atr == 0:
-            atr_ok = True
-        else:
-            atr_ok = (atr / row["close"]) > float(self.config.get("min_atr_ratio", 1e-5))
+        for i in range(n):
+            row = df.iloc[i]
+            price = float(row['close'])
+            # check existing positions TP/SL intra-bar
+            cur_pos = self.positions.get(symbol, [])
+            closed_this_bar = False
+            for pos in list(cur_pos):
+                entry = pos['entry_price']
+                tp_price = entry*(1+tp_pct)
+                sl_price = entry*(1-sl_pct)
+                # account for slippage: assume fill price hits tp/sl +/- slippage
+                if row['high'] >= tp_price:
+                    fill = tp_price*(1 - slippage)
+                    profit = (fill - entry)*pos['qty'] - pos['amount']*commission
+                    self.balance += pos['amount'] + profit
+                    self.trade_history.append({'timestamp': df.index[i], 'action':'TP','price':fill,'profit':profit,'amount':pos['amount']})
+                    cur_pos.remove(pos)
+                    wins.append(profit)
+                    closed_this_bar = True
+                    break
+                elif row['low'] <= sl_price:
+                    fill = sl_price*(1 + slippage)
+                    profit = (fill - entry)*pos['qty'] - pos['amount']*commission
+                    self.balance += pos['amount'] + profit
+                    self.trade_history.append({'timestamp': df.index[i], 'action':'SL','price':fill,'profit':profit,'amount':pos['amount']})
+                    cur_pos.remove(pos)
+                    losses.append(profit)
+                    closed_this_bar = True
+                    break
+            if closed_this_bar:
+                if cur_pos:
+                    self.positions[symbol] = cur_pos
+                else:
+                    self.positions.pop(symbol, None)
+                # immediately continue to next loop allowing re-entry using updated balance
 
-        # sample history for lorentzian score
-        start = max(0, idx - int(self.config.get("max_bars_back", 500)))
-        subset = df.iloc[start:idx]
-        sample = subset.tail(200).to_dict("records") if len(subset) > 0 else []
-        score = self.lorentzian_score(row.to_dict(), sample)
+            # prepare features for scoring
+            if i < 5: continue
+            start = max(0, i - lookback)
+            subset = df.iloc[start:i]
+            hist_feats = []
+            for _, r in subset.iterrows():
+                hist_feats.append([r['rsi'], r['wt'] if 'wt' in r else 0.0, r['cci'], r['adx'], r['macdh']])
+            cur_feats = [row['rsi'], row.get('wt',0.0), row['cci'], row['adx'], row['macdh']]
+            score = self.lorentzian_score(cur_feats, hist_feats)
 
-        # softened votes (to produce more signals)
-        buy_votes = 0
-        sell_votes = 0
-        if row.get("rsi",50) < 45: buy_votes += 1
-        if row.get("wt",0) < -4: buy_votes += 1
-        if row.get("cci",0) < -80: buy_votes += 1
-        if row.get("adx",0) > 8: buy_votes += 1
+            # signal: composite with MACD momentum and ADX
+            is_up = row['close'] > row['ema50'] and row['macdh'] > 0 and row['adx'] > adx_th
+            is_down = row['close'] < row['ema50'] and row['macdh'] < 0 and row['adx'] > adx_th
 
-        if row.get("rsi",50) > 55: sell_votes += 1
-        if row.get("wt",0) > 4: sell_votes += 1
-        if row.get("cci",0) > 80: sell_votes += 1
+            # determine kelly fraction from historical wins/losses
+            avg_win = np.mean(wins) if len(wins)>0 else 0.0
+            avg_loss = np.mean(losses) if len(losses)>0 else 0.0
+            win_rate = (np.sum(np.array(wins)>0)/len(wins)) if len(wins)>0 else 0.5
+            kelly = self.kelly_fraction(win_rate, avg_win, avg_loss) if len(wins)+len(losses)>5 else 0.0
 
-        score_threshold = float(self.config.get("score_threshold", 0.0005))
-
-        if is_uptrend and adx_ok and atr_ok and buy_votes >= 1 and score > score_threshold:
-            return "BUY", score
-        if is_downtrend and adx_ok and atr_ok and sell_votes >= 1 and score > score_threshold:
-            return "SELL", score
-        return "HOLD", score
-
-    def _close_position(self, symbol: str, pos: Dict, close_price: float, close_time, reason="SELL"):
-        profit = (close_price - pos["entry_price"]) * pos["qty"]
-        # credit locked amount + profit immediately
-        self.balance += pos["amount"] + profit
-        rec = {
-            "timestamp": close_time,
-            "symbol": symbol,
-            "action": reason,
-            "price": close_price,
-            "amount": pos["amount"],
-            "qty": pos["qty"],
-            "profit": profit,
-            "status": "CLOSED"
-        }
-        self.trade_history.append(rec)
-        return profit
-
-    def run_backtest(self, klines: pd.DataFrame, symbol:str, timeframe:str, demo=True):
-        df = klines.copy()
-        if "timestamp" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-            df.set_index("timestamp", inplace=True)
-        df = self.prepare_ohlcv(df)
-        df = self.add_indicators(df)
-        try:
-            df["rsi2"] = talib.RSI(df["close"].values, timeperiod=9)
-        except:
-            df["rsi2"] = df.get("rsi", 0)
-
-        # reset
-        self.balance = float(self.initial_balance)
-        self.positions = {}
-        self.trade_history = []
-        self._last_entry_index = {}
-
-        stop_pct = float(self.config.get("stop_loss_pct", 0.015))
-        tp_pct = float(self.config.get("take_profit_pct", 0.03))
-
-        for i in range(len(df)):
-            loops = 0
-            max_loops_per_bar = 6
-            while loops < max_loops_per_bar:
-                loops += 1
-                sig, conf = self.decide_signal(df, i)
-                price = float(df["close"].iloc[i])
-                high = float(df["high"].iloc[i])
-                low = float(df["low"].iloc[i])
-                ts = df.index[i]
-
-                # 1) Check intra-bar TP/SL for existing positions
-                current_positions = self.positions.get(symbol, [])
-                closed_any = False
-                for pos in list(current_positions):
-                    entry_price = pos["entry_price"]
-                    take_price = entry_price * (1 + tp_pct)
-                    stop_price = entry_price * (1 - stop_pct)
-                    if high >= take_price:
-                        self._close_position(symbol, pos, take_price, ts, reason="TP")
-                        current_positions.remove(pos)
-                        closed_any = True
-                        break
-                    elif low <= stop_price:
-                        self._close_position(symbol, pos, stop_price, ts, reason="SL")
-                        current_positions.remove(pos)
-                        closed_any = True
-                        break
-                if closed_any:
-                    if current_positions:
-                        self.positions[symbol] = current_positions
-                    else:
-                        self.positions.pop(symbol, None)
-                    # after close, continue loop to allow immediate re-entry using updated balance
+            # enter long
+            if score > score_th and is_up:
+                # compute position size
+                trade_amt, qty = self.compute_position_size(self.balance, risk_per_trade, kelly, price, min_amount)
+                if trade_amt <= 0 or trade_amt > self.balance: 
                     continue
+                # simulate opening (deduct amount)
+                self.balance -= trade_amt
+                pos = {'entry_time': df.index[i], 'entry_price': price*(1+slippage), 'qty': qty, 'amount': trade_amt}
+                self.positions.setdefault(symbol, []).append(pos)
+                self.trade_history.append({'timestamp': df.index[i], 'action':'BUY','price':pos['entry_price'],'amount':trade_amt})
+            # enter short (we handle only long in this simple version)
+            # optional: implement shorting with margin/leverage
 
-                # recompute positions
-                current_positions = self.positions.get(symbol, [])
+            # equity snapshot after processing bar
+            self.equity_curve.append(self.balance + sum([(p['amount'] + (row['close']-p['entry_price'])*p['qty']) for p in self.positions.get(symbol,[])]))
 
-                # re-entry control
-                allow_reentry = True
-                last_idx = self._last_entry_index.get(symbol, -99999)
-                if i - last_idx < int(self.config.get("reentry_bars", 0)):
-                    allow_reentry = False
+        # final close of any positions at last price
+        if self.positions.get(symbol):
+            last_price = float(df['close'].iloc[-1])
+            for pos in list(self.positions[symbol]):
+                fill = last_price*(1 - slippage)
+                profit = (fill - pos['entry_price'])*pos['qty'] - pos['amount']*commission
+                self.balance += pos['amount'] + profit
+                self.trade_history.append({'timestamp': df.index[-1], 'action':'CLOSE','price':fill,'profit':profit,'amount':pos['amount']})
+            self.positions.pop(symbol, None)
 
-                # 2) Manage openings/closings based on signal
-                if sig == "BUY":
-                    if (not current_positions) or self.config.get("allow_multiple_positions", True):
-                        if (not allow_reentry) and current_positions:
-                            pass
-                        else:
-                            risk = float(self.config.get("risk_per_trade", 0.05))
-                            trade_amt = max(float(self.config.get("min_trade_amount", 0.01)), min(self.balance * risk, self.balance * 0.5))
-                            if trade_amt <= 0 or trade_amt > self.balance:
-                                pass
-                            else:
-                                qty = trade_amt / price
-                                pos = {"entry_time": ts, "entry_price": price, "amount": trade_amt, "qty": qty, "status": "OPEN", "entry_index": i}
-                                self.positions.setdefault(symbol, []).append(pos)
-                                self.balance -= trade_amt
-                                self.trade_history.append({"timestamp": ts, "symbol": symbol, "action": "BUY", "price": price, "amount": trade_amt, "qty": qty, "status": "OPEN"})
-                                self._last_entry_index[symbol] = i
-                                # after opening, allow immediate TP/SL check in same bar
-                                continue
+        # metrics
+        closed = [t for t in self.trade_history if t['action'] in ('TP','SL','CLOSE')]
+        profits = [t.get('profit',0) for t in closed]
+        total_trades = len(closed)
+        win_trades = sum(1 for p in profits if p>0)
+        lose_trades = sum(1 for p in profits if p<0)
+        win_rate = win_trades/total_trades if total_trades>0 else 0
+        total_profit = sum(profits)
+        final_balance = self.balance
+        # compute drawdown
+        eq = np.array(self.equity_curve) if len(self.equity_curve)>0 else np.array([self.initial_balance])
+        peak = -np.inf
+        max_dd = 0.0
+        for v in eq:
+            if v>peak: peak=v
+            dd = (peak - v)/peak if peak>0 else 0
+            if dd>max_dd: max_dd=dd
 
-                elif sig == "SELL":
-                    if current_positions:
-                        pos = current_positions.pop(0)
-                        profit = (price - pos["entry_price"]) * pos["qty"]
-                        self.balance += pos["amount"] + profit
-                        rec = {"timestamp": ts, "symbol": symbol, "action": "SELL", "price": price, "amount": pos["amount"], "qty": pos["qty"], "profit": profit, "status": "CLOSED"}
-                        self.trade_history.append(rec)
-                        if current_positions:
-                            self.positions[symbol] = current_positions
-                        else:
-                            self.positions.pop(symbol, None)
-                        # allow immediate re-entry after close
-                        continue
+        # sharpe approx on trade profits (daily not precise)
+        sharpe = 0.0
+        if len(profits)>1:
+            sharpe = (np.mean(profits)/ (np.std(profits)+1e-9)) * sqrt(252)
 
-                break  # break loop for this bar (no more immediate changes)
+        return {
+            'final_balance': final_balance,
+            'total_trades': total_trades,
+            'win_rate': win_rate,
+            'total_profit': total_profit,
+            'max_drawdown': max_dd,
+            'sharpe': sharpe,
+            'trade_history': self.trade_history,
+            'equity_curve': self.equity_curve
+        }
 
-        # final bar: ensure closing any remaining opens at last price
-        if self.positions:
-            last_price = float(df["close"].iloc[-1])
-            last_ts = df.index[-1]
-            for sym, pos_list in list(self.positions.items()):
-                while pos_list:
-                    pos = pos_list.pop(0)
-                    profit = (last_price - pos["entry_price"]) * pos["qty"]
-                    self.balance += pos["amount"] + profit
-                    rec = {"timestamp": last_ts, "symbol": sym, "action": "SELL", "price": last_price, "amount": pos["amount"], "qty": pos["qty"], "profit": profit, "status": "CLOSED"}
-                    self.trade_history.append(rec)
-                self.positions.pop(sym, None)
-
-        return {"final_balance": self.balance, "trade_history": self.trade_history, "initial_balance": self.initial_balance}
+    # --- simple random search optimizer ---
+    def optimize_params(self, klines: pd.DataFrame, symbol: str, n_iter:int=50):
+        best = None
+        for _ in range(n_iter):
+            params = {
+                'score_th': 10**np.random.uniform(-5, -2),   # 1e-5 .. 1e-2
+                'adx_th': int(np.random.choice([6,8,10,12,15])),
+                'tp_pct': float(np.random.choice([0.02,0.03,0.04,0.05])),
+                'sl_pct': float(np.random.choice([0.01,0.015,0.02,0.025])),
+                'risk_per_trade': float(np.random.choice([0.02,0.03,0.05,0.08])),
+                'commission': 0.0008,
+                'slippage': 0.0005,
+                'lookback': int(np.random.choice([200,400,800])),
+                'min_amount': self.config.get('min_trade_amount',0.01)
+            }
+            perf = self.simulate(klines, symbol, params)
+            score = perf['final_balance']  # simple objective (could use sharpe, or dd-penalized)
+            if best is None or score > best['score']:
+                best = {'score': score, 'params': params, 'perf': perf}
+        return best
