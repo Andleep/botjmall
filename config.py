@@ -2,8 +2,8 @@
 import os
 
 BINANCE_CONFIG = {
-    "api_key": os.getenv("BINANCE_API_KEY",""),
-    "api_secret": os.getenv("BINANCE_API_SECRET","")
+    "api_key": os.getenv("BINANCE_API_KEY", ""),
+    "api_secret": os.getenv("BINANCE_API_SECRET", "")
 }
 
 LORENTZIAN_CONFIG = {
@@ -18,5 +18,8 @@ LORENTZIAN_CONFIG = {
     "use_time_filter": False,
     "allow_multiple_positions": True,
     "reentry_bars": 0,
-    "score_threshold": 0.0005
+    "score_threshold": 0.0005,
+    # Websocket / cache settings
+    "klines_cache_dir": ".klines_cache",
+    "klines_cache_ttl_secs": 60 * 60  # 1 hour
 }
