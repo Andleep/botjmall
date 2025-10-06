@@ -7,10 +7,13 @@ BINANCE_CONFIG = {
 LORENTZIAN_CONFIG = {
     "initial_balance": 10.0,
     "risk_per_trade": 0.02,
-    "min_trade_amount": 0.5,
+    "min_trade_amount": 0.1,
     "stop_loss_pct": 0.02,
     "take_profit_pct": 0.04,
-    "adx_threshold": 20,
-    "min_atr_ratio": 0.0005,
-    "max_bars_back": 500
+    "adx_threshold": 12,
+    "min_atr_ratio": 0.0001,
+    "max_bars_back": 500,
+    "use_time_filter": False,
+    "allow_multiple_positions": True,
+    "reentry_bars": 5
 }
