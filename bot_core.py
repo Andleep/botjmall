@@ -1,9 +1,9 @@
-# bot_core.py  (محسّن: Lorentzian + MACD + Kelly sizing + commission/slippage + random optimizer)
+# bot_core.py  (AdvancedLorentzianBot with optimizer)
 import pandas as pd
 import numpy as np
 import talib
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from math import sqrt
 
 logger = logging.getLogger(__name__)
@@ -31,8 +31,11 @@ class AdvancedLorentzianBot:
             df['ema50'] = talib.EMA(df['close'].values, timeperiod=50)
         except:
             df['ema50'] = df['close']
-        macd, macdsig, macdhist = talib.MACD(df['close'].values, fastperiod=12, slowperiod=26, signalperiod=9)
-        df['macdh'] = macdhist
+        try:
+            macd, macdsig, macdhist = talib.MACD(df['close'].values, fastperiod=12, slowperiod=26, signalperiod=9)
+            df['macdh'] = macdhist
+        except:
+            df['macdh'] = 0.0
         try:
             df['adx'] = talib.ADX(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)
         except:
@@ -132,8 +135,8 @@ class AdvancedLorentzianBot:
                     self.positions[symbol] = cur_pos
                 else:
                     self.positions.pop(symbol, None)
-            if i < 5: 
-                # need small warmup
+            if i < 5:
+                # warmup
                 self.equity_curve.append(self.balance)
                 continue
 
@@ -141,11 +144,11 @@ class AdvancedLorentzianBot:
             subset = df.iloc[start:i]
             hist_feats = []
             for _, r in subset.iterrows():
-                hist_feats.append([r['rsi'], r.get('wt',0.0), r['cci'], r.get('adx',0.0), r.get('macdh',0.0)])
+                hist_feats.append([r.get('rsi',50.0), r.get('wt',0.0), r.get('cci',0.0), r.get('adx',0.0), r.get('macdh',0.0)])
             cur_feats = [row.get('rsi',50.0), row.get('wt',0.0), row.get('cci',0.0), row.get('adx',0.0), row.get('macdh',0.0)]
             score = self.lorentzian_score(cur_feats, hist_feats)
 
-            is_up = row['close'] > row['ema50'] and row.get('macdh',0.0) > 0 and row.get('adx',0.0) > adx_th
+            is_up = row['close'] > row.get('ema50', row['close']) and row.get('macdh',0.0) > 0 and row.get('adx',0.0) > adx_th
             # compute kelly
             avg_win = np.mean(wins) if len(wins)>0 else 0.0
             avg_loss = np.mean(losses) if len(losses)>0 else 0.0
