@@ -172,7 +172,7 @@ with tab1:
                         status_text.text(f"🧠 البوت يحلل الفرص... {i+1}%")
                         time.sleep(0.01)
                     
-                    result = micro_bot.run_micro_backtest(klines_data, timeframe)
+                    result = micro_bot.run_enhanced_backtest(klines_data, timeframe)
                     progress_bar.empty()
                     status_text.empty()
                     
