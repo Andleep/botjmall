@@ -16,8 +16,7 @@ logging.basicConfig(level=logging.INFO)
 
 class MicroIntelligentTradingBot:
     """
-    بوت تداول فائق الذكاء مخصص للرؤوس الصغيرة (10$+)
-    مع ربح تراكمي فوري بعد كل صفقة ناجحة
+    بوت تداول مُصَحَح مع إدارة مخاطر محكمة وربح تراكمي فعال
     """
     
     def __init__(self, config: Dict):
@@ -28,24 +27,53 @@ class MicroIntelligentTradingBot:
         self.trade_history = []
         self.selected_pairs = self.config.get("selected_pairs", [])
         
-        # إحصائيات فورية
+        # 🔥 إضافة إحصائيات محسنة
         self.real_time_metrics = {
             'total_trades': 0,
             'successful_trades': 0,
             'total_profit': 0.0,
             'current_streak': 0,
             'max_streak': 0,
-            'compounded_profits': 0.0
+            'compounded_profits': 0.0,
+            'daily_profit': 0.0,
+            'daily_trades': 0,
+            'consecutive_losses': 0  # 🔥 تتبع الخسائر المتتالية
         }
         
-        # أنظمة التعلم
+        # 🔥 إضافة أنظمة حماية
+        self.protection_metrics = {
+            'daily_stop_loss': False,
+            'max_daily_loss': self.config.get("daily_loss_limit", 0.20) * self.initial_balance,
+            'current_daily_loss': 0.0,
+            'trading_enabled': True
+        }
+        
         self.learning_data = []
         self.adaptive_strategies = {}
         
-        logger.info(f"🤖 البوت المصغر جاهز | رأس المال: ${self.balance:.2f}")
+        logger.info(f"🤖 البوت المُصَحَح جاهز | رأس المال: ${self.balance:.2f}")
+    
+    def check_trading_permission(self) -> bool:
+        """🔥 فحص إذا كان التداول مسموح به"""
+        if not self.protection_metrics['trading_enabled']:
+            return False
+            
+        # فحص الخسارة اليومية
+        daily_loss = abs(self.protection_metrics['current_daily_loss'])
+        if daily_loss >= self.protection_metrics['max_daily_loss']:
+            logger.warning("🛑 توقف التداول - وصلت للحد الأقصى للخسارة اليومية")
+            self.protection_metrics['trading_enabled'] = False
+            return False
+            
+        # فحص الخسائر المتتالية
+        if self.real_time_metrics['consecutive_losses'] >= self.config.get("consecutive_loss_limit", 3):
+            logger.warning("🛑 توقف مؤقت - 3 خسائر متتالية")
+            return False
+            
+        return True
     
     def prepare_micro_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """تحضير بيانات سريعة للرؤوس الصغيرة"""
+        """تحضير بيانات محسنة"""
         df = df.copy()
         
         for col in ["open", "high", "low", "close", "volume"]:
@@ -54,142 +82,161 @@ class MicroIntelligentTradingBot:
         df['hlc3'] = (df['high'] + df['low'] + df['close']) / 3
         return df
     
-    def calculate_fast_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """مؤشرات سريعة وفعالة للرؤوس الصغيرة"""
+    def calculate_enhanced_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """مؤشرات محسنة مع تصفية أفضل"""
         df = df.copy()
         
-        # مؤشرات أساسية سريعة
+        # المؤشرات الأساسية
         df["ema9"] = talib.EMA(df["close"], 9)
         df["ema21"] = talib.EMA(df["close"], 21)
-        df["rsi6"] = talib.RSI(df["close"], 6)
         df["rsi14"] = talib.RSI(df["close"], 14)
         df["macd"], df["macd_signal"], df["macd_hist"] = talib.MACD(df["close"], 6, 13, 5)
         df["stoch_k"], df["stoch_d"] = talib.STOCH(df["high"], df["low"], df["close"], 5, 3, 0)
         df["atr"] = talib.ATR(df["high"], df["low"], df["close"], 7)
         df["bb_upper"], df["bb_middle"], df["bb_lower"] = talib.BBANDS(df["close"], 10, 2, 2)
         
-        # مؤشرات مخصصة سريعة
-        df['momentum_3'] = df['close'].pct_change(3)
-        df['volume_ratio'] = df['volume'] / df['volume'].rolling(10).mean()
-        df['price_velocity'] = (df['close'] - df['close'].shift(5)) / df['close'].shift(5)
+        # 🔥 مؤشرات تصفية محسنة
+        df['trend_strength'] = abs(df['ema9'] - df['ema21']) / df['atr']
+        df['volume_surge'] = df['volume'] / df['volume'].rolling(10).mean()
+        df['price_momentum'] = df['close'].pct_change(3)
         
-        # إشارات فورية
-        df['oversold'] = ((df['rsi6'] < 25) & (df['rsi14'] < 35)).astype(int)
-        df['overbought'] = ((df['rsi6'] > 75) & (df['rsi14'] > 65)).astype(int)
-        df['bb_buy'] = (df['close'] < df['bb_lower']).astype(int)
-        df['bb_sell'] = (df['close'] > df['bb_upper']).astype(int)
-        df['macd_buy'] = ((df['macd'] > df['macd_signal']) & (df['macd_hist'] > 0)).astype(int)
-        df['macd_sell'] = ((df['macd'] < df['macd_signal']) & (df['macd_hist'] < 0)).astype(int)
+        # 🔥 إشارات أكثر تحفظاً
+        df['strong_buy'] = (
+            (df['rsi14'] < 30) & 
+            (df['close'] < df['bb_lower']) & 
+            (df['macd_hist'] > 0) &
+            (df['trend_strength'] > 0.5) &
+            (df['volume_surge'] > 1.2)
+        ).astype(int)
+        
+        df['strong_sell'] = (
+            (df['rsi14'] > 70) & 
+            (df['close'] > df['bb_upper']) & 
+            (df['macd_hist'] < 0) &
+            (df['trend_strength'] > 0.5) &
+            (df['volume_surge'] > 1.2)
+        ).astype(int)
         
         return df
     
-    def micro_ai_decision(self, df: pd.DataFrame, idx: int, symbol: str) -> Dict:
-        """قرار ذكي سريع للرؤوس الصغيرة"""
-        if idx < 20:
+    def enhanced_ai_decision(self, df: pd.DataFrame, idx: int, symbol: str) -> Dict:
+        """🔥 قرار تداول محسَن مع تصفية صارمة"""
+        if idx < 25:
             return {"signal": "HOLD", "confidence": 0.0, "reason": "بيانات غير كافية"}
         
         row = df.iloc[idx]
         
-        # نظام تصويت سريع
-        buy_signals = 0
-        sell_signals = 0
+        # 🔥 تصفية أولية - تأكد من وجود اتجاه قوي
+        if row['trend_strength'] < 0.3:
+            return {"signal": "HOLD", "confidence": 0.0, "reason": "اتجاه ضعيف"}
         
-        # إشارات شراء
-        if row['oversold'] == 1:
-            buy_signals += 2
-        if row['bb_buy'] == 1:
-            buy_signals += 2
-        if row['macd_buy'] == 1:
-            buy_signals += 1
-        if row['stoch_k'] < 20 and row['stoch_d'] < 20:
-            buy_signals += 1
-        if row['momentum_3'] > 0.008 and row['volume_ratio'] > 1.2:
-            buy_signals += 2
-        if row['close'] > row['ema9'] and row['ema9'] > row['ema21']:
-            buy_signals += 1
+        # 🔥 نظام تصويت مرجح
+        buy_score = 0
+        sell_score = 0
         
-        # إشارات بيع
-        if row['overbought'] == 1:
-            sell_signals += 2
-        if row['bb_sell'] == 1:
-            sell_signals += 2
-        if row['macd_sell'] == 1:
-            sell_signals += 1
-        if row['stoch_k'] > 80 and row['stoch_d'] > 80:
-            sell_signals += 1
-        if row['momentum_3'] < -0.008 and row['volume_ratio'] > 1.2:
-            sell_signals += 2
-        if row['close'] < row['ema9'] and row['ema9'] < row['ema21']:
-            sell_signals += 1
+        # إشارات شراء مع أوزان
+        if row['strong_buy'] == 1:
+            buy_score += 3
+        if row['rsi14'] < 30:
+            buy_score += 2
+        if row['macd_hist'] > 0 and row['macd'] > row['macd_signal']:
+            buy_score += 1
+        if row['stoch_k'] < 20:
+            buy_score += 1
+        if row['price_momentum'] > 0.01:  # زخم إيجابي قوي
+            buy_score += 2
+            
+        # إشارات بيع مع أوزان  
+        if row['strong_sell'] == 1:
+            sell_score += 3
+        if row['rsi14'] > 70:
+            sell_score += 2
+        if row['macd_hist'] < 0 and row['macd'] < row['macd_signal']:
+            sell_score += 1
+        if row['stoch_k'] > 80:
+            sell_score += 1
+        if row['price_momentum'] < -0.01:  # زخم سلبي قوي
+            sell_score += 2
         
-        total_signals = buy_signals + sell_signals
-        if total_signals == 0:
-            return {"signal": "HOLD", "confidence": 0.0, "reason": "لا توجد إشارات"}
+        total_score = buy_score + sell_score
+        if total_score == 0:
+            return {"signal": "HOLD", "confidence": 0.0, "reason": "لا توجد إشارات قوية"}
         
-        buy_ratio = buy_signals / total_signals
-        sell_ratio = sell_signals / total_signals
+        buy_ratio = buy_score / total_score
+        sell_ratio = sell_score / total_score
         
         confidence = max(buy_ratio, sell_ratio) * 100
         
-        # قرار ذكي مع عتبات مرنة
-        if buy_ratio >= 0.6 and confidence >= 65:
+        # 🔥 عتبات أعلى لتحسين الدقة
+        if buy_ratio >= 0.7 and confidence >= 75:  # كان 0.6 و65%
             return {
                 "signal": "BUY", 
                 "confidence": confidence,
-                "reason": f"إشارات شراء قوية ({buy_signals}/{total_signals})"
+                "reason": f"إشارات شراء قوية جداً ({buy_score}/{total_score})"
             }
-        elif sell_ratio >= 0.6 and confidence >= 65:
+        elif sell_ratio >= 0.7 and confidence >= 75:
             return {
                 "signal": "SELL", 
                 "confidence": confidence,
-                "reason": f"إشارات بيع قوية ({sell_signals}/{total_signals})"
+                "reason": f"إشارات بيع قوية جداً ({sell_score}/{total_score})"
             }
         else:
             return {
                 "signal": "HOLD", 
                 "confidence": confidence,
-                "reason": f"إشارات غير حاسمة (شراء: {buy_signals}, بيع: {sell_signals})"
+                "reason": f"إشارات غير كافية (شراء: {buy_score}, بيع: {sell_score})"
             }
     
-    def smart_micro_money_management(self, confidence: float, symbol: str) -> float:
-        """إدارة أموال ذكية للرؤوس الصغيرة"""
-        # قاعدة خطر ديناميكية
-        base_risk = self.config.get("base_risk", 0.04)
+    def safe_money_management(self, confidence: float, symbol: str) -> Tuple[float, float, float]:
+        """🔥 إدارة أموال آمنة مع وقف خسارة وجني أرباح"""
+        # حجم المركز الآمن
+        base_risk = self.config.get("base_risk", 0.02)
         
         # تعديل بناءً على الأداء
-        if self.real_time_metrics['current_streak'] >= 2:
-            base_risk *= 1.3  # زيادة بعد صفقات رابحة
-        elif self.real_time_metrics['current_streak'] <= -1:
-            base_risk *= 0.7  # تقليل بعد خسائر
+        if self.real_time_metrics['consecutive_losses'] >= 2:
+            base_risk *= 0.5  # تقليل المخاطرة بعد خسائر متتالية
         
-        # تعديل بناءً على الثقة
         risk_adjusted = base_risk * (confidence / 100.0)
         
-        # حدود ذكية
-        max_risk = self.config.get("max_risk", 0.08)
-        min_risk = self.config.get("min_risk", 0.015)
+        # حدود آمنة
+        max_risk = self.config.get("max_risk", 0.04)
+        min_risk = self.config.get("min_risk", 0.008)
         final_risk = np.clip(risk_adjusted, min_risk, max_risk)
         
-        # حساب حجم المركز
         position_size = self.balance * final_risk
         
-        # حدود الصفقات المصغرة
-        min_trade = self.config.get("min_trade", 0.50)  # 50 سنت حد أدنى
-        max_trade = self.config.get("max_trade", 3.00)  # 3 دولار حد أقصى
+        # حدود حجم الصفقة
+        min_trade = self.config.get("min_trade", 1.00)
+        max_trade = self.config.get("max_trade", 2.00)
+        position_size = np.clip(position_size, min_trade, max_trade)
         
-        # منع التداول إذا كان المبلغ صغير جداً
-        if position_size < min_trade and self.balance > min_trade:
-            position_size = min_trade
-        elif position_size < min_trade:
-            return 0.0
+        # 🔥 وقف خسارة وجني أرباح ديناميكي
+        stop_loss_pct = self.config.get("max_stop_loss", 0.015)  # 1.5%
+        take_profit_pct = self.config.get("min_profit_target", 0.003)  # 0.3%
         
-        return np.clip(position_size, min_trade, max_trade)
+        # تعديل بناءً على الثقة
+        if confidence > 80:
+            take_profit_pct *= 1.5  # زيادة جني الأرباح للصفقات عالية الثقة
+        
+        return position_size, stop_loss_pct, take_profit_pct
+    
+    def calculate_trade_result(self, entry_price: float, exit_price: float, position_size: float, qty: float) -> float:
+        """🔥 حساب نتيجة الصفقة مع عمولة Binance"""
+        raw_profit = (exit_price - entry_price) * qty
+        
+        # 🔥 خصم عمولة Binance (0.1% تقريباً)
+        commission = abs(raw_profit) * 0.001
+        net_profit = raw_profit - commission
+        
+        return net_profit
     
     def instant_profit_compounding(self, profit: float, trade_info: Dict):
-        """ربح تراكمي فوري بعد كل صفقة ناجحة"""
+        """🔥 ربح تراكمي فوري مع تحديث الرصيد"""
         if profit > 0:
-            # إضافة الربح إلى الرصيد فوراً
+            # 🔥 تسجيل الرصيد القديم
             old_balance = self.balance
+            
+            # 🔥 إضافة الربح إلى الرصيد فوراً
             self.balance += profit
             
             # تحديث الإحصائيات
@@ -201,13 +248,16 @@ class MicroIntelligentTradingBot:
                 self.real_time_metrics['max_streak'], 
                 self.real_time_metrics['current_streak']
             )
+            self.real_time_metrics['consecutive_losses'] = 0  # 🔥 إعادة تعيين الخسائر المتتالية
             
             logger.info(f"💰 ربح تراكمي فوري: +${profit:.4f} | {old_balance:.2f} → {self.balance:.2f}")
             
             # تعلم من النجاح
             self.learn_from_trade(trade_info, True)
         else:
-            self.real_time_metrics['current_streak'] = min(self.real_time_metrics['current_streak'] - 1, 0)
+            self.real_time_metrics['current_streak'] = 0
+            self.real_time_metrics['consecutive_losses'] += 1  # 🔥 تتبع الخسائر المتتالية
+            self.protection_metrics['current_daily_loss'] += profit  # 🔥 تحديث الخسارة اليومية
             self.learn_from_trade(trade_info, False)
     
     def learn_from_trade(self, trade_info: Dict, successful: bool):
@@ -222,44 +272,19 @@ class MicroIntelligentTradingBot:
         }
         
         self.learning_data.append(learning_entry)
-        
-        # تحديث الاستراتيجيات التكيفية
-        strategy_key = f"{trade_info.get('symbol', '')}_{trade_info.get('decision', {}).get('signal', 'HOLD')}"
-        if strategy_key not in self.adaptive_strategies:
-            self.adaptive_strategies[strategy_key] = {
-                'attempts': 0,
-                'successes': 0,
-                'total_profit': 0.0,
-                'last_used': datetime.now()
-            }
-        
-        self.adaptive_strategies[strategy_key]['attempts'] += 1
-        if successful:
-            self.adaptive_strategies[strategy_key]['successes'] += 1
-            self.adaptive_strategies[strategy_key]['total_profit'] += trade_info.get('profit', 0)
-        self.adaptive_strategies[strategy_key]['last_used'] = datetime.now()
     
-    def get_strategy_effectiveness(self, symbol: str, signal: str) -> float:
-        """الحصول على فعالية الاستراتيجية"""
-        strategy_key = f"{symbol}_{signal}"
-        if strategy_key in self.adaptive_strategies:
-            stats = self.adaptive_strategies[strategy_key]
-            if stats['attempts'] > 0:
-                return stats['successes'] / stats['attempts']
-        return 0.5  # فعالية افتراضية
-    
-    def run_micro_backtest(self, klines_data: Dict, timeframe: str):
-        """محاكاة مخصصة للرؤوس الصغيرة"""
+    def run_enhanced_backtest(self, klines_data: Dict, timeframe: str):
+        """🔥 محاكاة محسنة مع أنظمة حماية"""
         results = {}
         total_trades = 0
         
-        logger.info(f"🚀 بدء المحاكاة المصغرة على {len(self.selected_pairs)} أزواج")
+        logger.info(f"🚀 بدء المحاكاة المحسنة على {len(self.selected_pairs)} أزواج")
         
         for symbol in self.selected_pairs:
             if symbol not in klines_data:
                 continue
                 
-            logger.info(f"🔍 تحليل {symbol}...")
+            logger.info(f"🔍 تحليل {symbol} بمؤشرات محسنة...")
             df = klines_data[symbol].copy()
             
             if "timestamp" in df.columns:
@@ -267,26 +292,25 @@ class MicroIntelligentTradingBot:
                 df.set_index("timestamp", inplace=True)
                 
             df = self.prepare_micro_data(df)
-            df = self.calculate_fast_indicators(df)
+            df = self.calculate_enhanced_indicators(df)
             
             pair_trades = 0
             
-            for i in range(20, len(df)):
-                # قرار الذكاء الاصطناعي السريع
-                ai_decision = self.micro_ai_decision(df, i, symbol)
+            for i in range(25, len(df)):  # 🔥 بداية من 25 للحصول على بيانات أكثر
+                # 🔥 فحص إذن التداول أولاً
+                if not self.check_trading_permission():
+                    break
+                
+                # قرار الذكاء الاصطناعي المحسَن
+                ai_decision = self.enhanced_ai_decision(df, i, symbol)
                 signal = ai_decision["signal"]
                 confidence = ai_decision["confidence"]
-                
-                # التحقق من فعالية الاستراتيجية
-                strategy_effectiveness = self.get_strategy_effectiveness(symbol, signal)
-                if strategy_effectiveness < 0.4 and self.real_time_metrics['total_trades'] > 10:
-                    continue  # تخطي الاستراتيجيات غير الفعالة
                 
                 price = float(df["close"].iloc[i])
                 ts = df.index[i]
                 
-                if signal in ["BUY", "SELL"] and confidence >= self.config.get("confidence_threshold", 65):
-                    position_size = self.smart_micro_money_management(confidence, symbol)
+                if signal in ["BUY", "SELL"] and confidence >= self.config.get("confidence_threshold", 75):
+                    position_size, stop_loss_pct, take_profit_pct = self.safe_money_management(confidence, symbol)
                     
                     if position_size > 0 and signal == "BUY" and symbol not in self.positions:
                         # فتح صفقة شراء
@@ -298,6 +322,8 @@ class MicroIntelligentTradingBot:
                             "qty": qty,
                             "type": "LONG", 
                             "confidence": confidence,
+                            "stop_loss": price * (1 - stop_loss_pct),
+                            "take_profit": price * (1 + take_profit_pct),
                             "decision_data": ai_decision
                         }
                         self.balance -= position_size
@@ -308,19 +334,26 @@ class MicroIntelligentTradingBot:
                             "confidence": confidence, "status": "OPEN",
                             "balance_before": self.balance + position_size,
                             "balance_after": self.balance,
-                            "decision_reason": ai_decision["reason"]
+                            "decision_reason": ai_decision["reason"],
+                            "stop_loss": price * (1 - stop_loss_pct),
+                            "take_profit": price * (1 + take_profit_pct)
                         }
                         self.trade_history.append(trade_record)
                         pair_trades += 1
                         total_trades += 1
                         self.real_time_metrics['total_trades'] += 1
+                        self.real_time_metrics['daily_trades'] += 1
                         
                     elif signal == "SELL" and symbol in self.positions:
                         # إغلاق صفقة شراء
                         pos = self.positions.pop(symbol)
-                        profit = (price - pos["entry_price"]) * pos["qty"]
                         
-                        # ✅ تطبيق الربح التراكمي الفوري
+                        # 🔥 حساب الربح مع العمولة
+                        profit = self.calculate_trade_result(
+                            pos["entry_price"], price, pos["amount"], pos["qty"]
+                        )
+                        
+                        # 🔥 تطبيق الربح التراكمي الفوري
                         self.instant_profit_compounding(profit, {
                             'symbol': symbol,
                             'decision': ai_decision,
@@ -341,12 +374,15 @@ class MicroIntelligentTradingBot:
                         self.trade_history.append(trade_record)
                         pair_trades += 1
                         total_trades += 1
+                        self.real_time_metrics['daily_trades'] += 1
             
             # إغلاق المراكز المتبقية
             if symbol in self.positions:
                 pos = self.positions.pop(symbol)
                 price = float(df["close"].iloc[-1])
-                profit = (price - pos["entry_price"]) * pos["qty"]
+                profit = self.calculate_trade_result(
+                    pos["entry_price"], price, pos["amount"], pos["qty"]
+                )
                 
                 self.instant_profit_compounding(profit, {
                     'symbol': symbol,
@@ -377,7 +413,7 @@ class MicroIntelligentTradingBot:
         winning_trades = len([t for t in closed_trades if t.get('profit', 0) > 0])
         win_rate = (winning_trades / len(closed_trades)) * 100 if closed_trades else 0
         
-        logger.info(f"🎯 انتهت المحاكاة المصغرة | الصفقات: {total_trades} | "
+        logger.info(f"🎯 انتهت المحاكاة المحسنة | الصفقات: {total_trades} | "
                    f"الربح: ${total_profit:.2f} ({profit_percentage:.2f}%) | "
                    f"معدل النجاح: {win_rate:.1f}% | "
                    f"الرصيد النهائي: ${self.balance:.2f}")
@@ -391,6 +427,6 @@ class MicroIntelligentTradingBot:
             "trade_history": self.trade_history,
             "initial_balance": self.initial_balance,
             "real_time_metrics": self.real_time_metrics,
-            "adaptive_strategies": self.adaptive_strategies,
+            "protection_metrics": self.protection_metrics,
             "learning_data_size": len(self.learning_data)
         }
