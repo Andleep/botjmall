@@ -1,228 +1,305 @@
-# bot_core.py  (AdvancedLorentzianBot with optimizer)
 import pandas as pd
 import numpy as np
 import talib
+from datetime import datetime, timedelta
 import logging
-from typing import Dict, List
-from math import sqrt
+from typing import Dict, List, Optional, Tuple
+import warnings
+
+warnings.filterwarnings('ignore')
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-class AdvancedLorentzianBot:
+class MicroTradingBot:
+    """
+    بوت تداول مصمم خصيصاً للرؤوس الصغيرة (10$ فما فوق)
+    مع ربح تراكمي فوري بعد كل صفقة
+    """
+    
     def __init__(self, config: Dict):
         self.config = config.copy()
         self.initial_balance = float(self.config.get("initial_balance", 10.0))
-        self.reset_state()
-
-    def reset_state(self):
         self.balance = float(self.initial_balance)
-        self.positions = {}      # symbol -> list of pos
+        self.positions = {}
         self.trade_history = []
-        self.equity_curve = []
-
-    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
-        for c in ['open','high','low','close','volume']:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
-        df['hlc3'] = (df['high']+df['low']+df['close'])/3.0
-        # indicators
-        try:
-            df['ema50'] = talib.EMA(df['close'].values, timeperiod=50)
-        except:
-            df['ema50'] = df['close']
-        try:
-            macd, macdsig, macdhist = talib.MACD(df['close'].values, fastperiod=12, slowperiod=26, signalperiod=9)
-            df['macdh'] = macdhist
-        except:
-            df['macdh'] = 0.0
-        try:
-            df['adx'] = talib.ADX(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)
-        except:
-            df['adx'] = 0.0
-        try:
-            df['atr'] = talib.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)
-        except:
-            df['atr'] = 0.0
-        try:
-            df['rsi'] = talib.RSI(df['close'].values, timeperiod=14)
-        except:
-            df['rsi'] = 50.0
-        try:
-            df['cci'] = talib.CCI(df['high'].values, df['low'].values, df['close'].values, timeperiod=20)
-        except:
-            df['cci'] = 0.0
-        # wave trend approx
-        try:
-            esa = talib.EMA(df['hlc3'].values, timeperiod=10)
-            de = talib.EMA(np.abs(df['hlc3'].values - esa), timeperiod=10)
-            ci = (df['hlc3'].values - esa) / (0.015 * de)
-            wt1 = talib.EMA(ci, timeperiod=21)
-            wt2 = talib.SMA(wt1, timeperiod=4)
-            df['wt'] = wt1 - wt2
-        except:
-            df['wt'] = 0.0
-        return df
-
-    def lorentzian_score(self, features_cur: List[float], hist_feats: List[List[float]]) -> float:
-        if len(hist_feats) == 0:
-            return 0.0
-        d = np.array([np.sum(np.log1p(np.abs(np.array(features_cur) - np.array(h)))) for h in hist_feats])
-        median = np.median(d)
-        return 1.0/(1.0+median)
-
-    def kelly_fraction(self, win_rate: float, avg_win: float, avg_loss: float) -> float:
-        if avg_loss == 0:
-            return 0.0
-        R = avg_win / abs(avg_loss) if avg_loss != 0 else 0
-        k = win_rate - (1-win_rate)/R if R>0 else 0.0
-        return max(0.0, min(k, 0.5))
-
-    def compute_position_size(self, balance: float, risk_per_trade: float, kelly_frac: float, price: float, min_amount: float):
-        alpha = float(self.config.get('kelly_weight', 0.6))
-        frac = risk_per_trade*(1-alpha) + kelly_frac*alpha
-        trade_amt = max(min_amount, min(balance * frac, balance*0.5))
-        qty = trade_amt / price if price>0 else 0.0
-        return trade_amt, qty
-
-    def simulate(self, klines: pd.DataFrame, symbol: str, params: Dict) -> Dict:
-        df = self.prepare(klines)
-        n = len(df)
-        self.reset_state()
-        score_th = params.get('score_th', 0.0005)
-        adx_th = params.get('adx_th', 8)
-        tp_pct = params.get('tp_pct', 0.03)
-        sl_pct = params.get('sl_pct', 0.015)
-        risk_per_trade = params.get('risk_per_trade', 0.05)
-        commission = params.get('commission', 0.0008)
-        slippage = params.get('slippage', 0.0005)
-        lookback = params.get('lookback', 500)
-        min_amount = params.get('min_amount', 0.01)
-
-        wins = []
-        losses = []
-
-        for i in range(n):
-            row = df.iloc[i]
-            price = float(row['close'])
-            # check TP/SL intra-bar
-            cur_pos = self.positions.get(symbol, [])
-            closed_this_bar = False
-            for pos in list(cur_pos):
-                entry = pos['entry_price']
-                tp_price = entry*(1+tp_pct)
-                sl_price = entry*(1-sl_pct)
-                if row['high'] >= tp_price:
-                    fill = tp_price*(1 - slippage)
-                    profit = (fill - entry)*pos['qty'] - pos['amount']*commission
-                    self.balance += pos['amount'] + profit
-                    self.trade_history.append({'timestamp': df.index[i], 'action':'TP','price':fill,'profit':profit,'amount':pos['amount']})
-                    cur_pos.remove(pos)
-                    wins.append(profit)
-                    closed_this_bar = True
-                    break
-                elif row['low'] <= sl_price:
-                    fill = sl_price*(1 + slippage)
-                    profit = (fill - entry)*pos['qty'] - pos['amount']*commission
-                    self.balance += pos['amount'] + profit
-                    self.trade_history.append({'timestamp': df.index[i], 'action':'SL','price':fill,'profit':profit,'amount':pos['amount']})
-                    cur_pos.remove(pos)
-                    losses.append(profit)
-                    closed_this_bar = True
-                    break
-            if closed_this_bar:
-                if cur_pos:
-                    self.positions[symbol] = cur_pos
-                else:
-                    self.positions.pop(symbol, None)
-            if i < 5:
-                # warmup
-                self.equity_curve.append(self.balance)
-                continue
-
-            start = max(0, i - lookback)
-            subset = df.iloc[start:i]
-            hist_feats = []
-            for _, r in subset.iterrows():
-                hist_feats.append([r.get('rsi',50.0), r.get('wt',0.0), r.get('cci',0.0), r.get('adx',0.0), r.get('macdh',0.0)])
-            cur_feats = [row.get('rsi',50.0), row.get('wt',0.0), row.get('cci',0.0), row.get('adx',0.0), row.get('macdh',0.0)]
-            score = self.lorentzian_score(cur_feats, hist_feats)
-
-            is_up = row['close'] > row.get('ema50', row['close']) and row.get('macdh',0.0) > 0 and row.get('adx',0.0) > adx_th
-            # compute kelly
-            avg_win = np.mean(wins) if len(wins)>0 else 0.0
-            avg_loss = np.mean(losses) if len(losses)>0 else 0.0
-            win_rate = (np.sum(np.array(wins)>0)/len(wins)) if len(wins)>0 else 0.5
-            kelly = self.kelly_fraction(win_rate, avg_win, avg_loss) if len(wins)+len(losses)>5 else 0.0
-
-            if score > score_th and is_up:
-                trade_amt, qty = self.compute_position_size(self.balance, risk_per_trade, kelly, price, min_amount)
-                if trade_amt <= 0 or trade_amt > self.balance:
-                    self.equity_curve.append(self.balance)
-                    continue
-                self.balance -= trade_amt
-                pos = {'entry_time': df.index[i], 'entry_price': price*(1+slippage), 'qty': qty, 'amount': trade_amt}
-                self.positions.setdefault(symbol, []).append(pos)
-                self.trade_history.append({'timestamp': df.index[i], 'action':'BUY','price':pos['entry_price'],'amount':trade_amt})
-            # snapshot equity
-            unreal = sum([(row['close'] - p['entry_price'])*p['qty'] + p['amount'] for p in self.positions.get(symbol,[])])
-            self.equity_curve.append(self.balance + unreal)
-
-        # final close
-        if self.positions.get(symbol):
-            last_price = float(df['close'].iloc[-1])
-            for pos in list(self.positions[symbol]):
-                fill = last_price*(1 - slippage)
-                profit = (fill - pos['entry_price'])*pos['qty'] - pos['amount']*commission
-                self.balance += pos['amount'] + profit
-                self.trade_history.append({'timestamp': df.index[-1], 'action':'CLOSE','price':fill,'profit':profit,'amount':pos['amount']})
-            self.positions.pop(symbol, None)
-
-        closed = [t for t in self.trade_history if t['action'] in ('TP','SL','CLOSE')]
-        profits = [t.get('profit',0) for t in closed]
-        total_trades = len(closed)
-        win_trades = sum(1 for p in profits if p>0)
-        lose_trades = sum(1 for p in profits if p<0)
-        win_rate = win_trades/total_trades if total_trades>0 else 0
-        total_profit = sum(profits)
-        final_balance = self.balance
-        eq = np.array(self.equity_curve) if len(self.equity_curve)>0 else np.array([self.initial_balance])
-        peak = -np.inf
-        max_dd = 0.0
-        for v in eq:
-            if v>peak: peak=v
-            dd = (peak - v)/peak if peak>0 else 0
-            if dd>max_dd: max_dd=dd
-        sharpe = 0.0
-        if len(profits)>1:
-            sharpe = (np.mean(profits)/ (np.std(profits)+1e-9)) * sqrt(252)
-        return {
-            'final_balance': final_balance,
-            'total_trades': total_trades,
-            'win_rate': win_rate,
-            'total_profit': total_profit,
-            'max_drawdown': max_dd,
-            'sharpe': sharpe,
-            'trade_history': self.trade_history,
-            'equity_curve': self.equity_curve
+        self.selected_pairs = self.config.get("selected_pairs", [])
+        
+        # إحصائيات فورية
+        self.live_metrics = {
+            'total_trades': 0,
+            'winning_trades': 0,
+            'total_profit': 0.0,
+            'current_streak': 0,
+            'max_streak': 0
         }
-
-    def optimize_params(self, klines: pd.DataFrame, symbol: str, n_iter:int=50):
-        best = None
-        for _ in range(n_iter):
-            params = {
-                'score_th': 10**np.random.uniform(-5, -2),
-                'adx_th': int(np.random.choice([6,8,10,12,15])),
-                'tp_pct': float(np.random.choice([0.02,0.03,0.04,0.05])),
-                'sl_pct': float(np.random.choice([0.01,0.015,0.02,0.025])),
-                'risk_per_trade': float(np.random.choice([0.02,0.03,0.05,0.08])),
-                'commission': 0.0008,
-                'slippage': 0.0005,
-                'lookback': int(np.random.choice([200,400,800])),
-                'min_amount': self.config.get('min_trade_amount',0.01)
+        
+        logger.info(f"🤖 البوت المصغر جاهز | رأس المال: ${self.balance:.2f}")
+    
+    def prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """تحضير بيانات سريعة للرؤوس الصغيرة"""
+        df = df.copy()
+        
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        df['hlc3'] = (df['high'] + df['low'] + df['close']) / 3
+        return df
+    
+    def add_fast_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """مؤشرات سريعة ومثبتة للرؤوس الصغيرة"""
+        df = df.copy()
+        
+        # مؤشرات أساسية سريعة
+        df["ema_9"] = talib.EMA(df["close"], 9)
+        df["ema_21"] = talib.EMA(df["close"], 21)
+        df["rsi_6"] = talib.RSI(df["close"], 6)
+        df["rsi_14"] = talib.RSI(df["close"], 14)
+        df["macd"], df["macd_signal"], df["macd_hist"] = talib.MACD(df["close"], 6, 13, 5)
+        df["stoch_k"], df["stoch_d"] = talib.STOCH(df["high"], df["low"], df["close"], 5, 3, 0)
+        df["atr"] = talib.ATR(df["high"], df["low"], df["close"], 7)
+        
+        # بولنجر باند سريع
+        df["bb_upper"], df["bb_middle"], df["bb_lower"] = talib.BBANDS(df["close"], 10, 2, 2)
+        
+        # مؤشرات مخصصة للرؤوس الصغيرة
+        df["momentum_3"] = df["close"].pct_change(3)
+        df["volume_ratio"] = df["volume"] / df["volume"].rolling(10).mean()
+        df["price_position"] = (df["close"] - df["bb_lower"]) / (df["bb_upper"] - df["bb_lower"])
+        
+        return df
+    
+    def micro_signal_detection(self, df: pd.DataFrame, idx: int) -> Dict:
+        """كشف إشارات مخصص للرؤوس الصغيرة"""
+        if idx < 20:
+            return {"signal": "HOLD", "confidence": 0, "reason": "بيانات غير كافية"}
+        
+        row = df.iloc[idx]
+        
+        buy_signals = 0
+        sell_signals = 0
+        
+        # إشارات شراء قوية للرؤوس الصغيرة
+        if row["rsi_6"] < 25 and row["rsi_14"] < 35:
+            buy_signals += 3
+        if row["close"] < row["bb_lower"] and row["rsi_6"] < 30:
+            buy_signals += 2
+        if row["macd_hist"] > 0 and row["macd"] > row["macd_signal"]:
+            buy_signals += 2
+        if row["stoch_k"] < 20 and row["stoch_d"] < 20:
+            buy_signals += 1
+        if row["momentum_3"] > 0.008 and row["volume_ratio"] > 1.2:
+            buy_signals += 2
+        
+        # إشارات بيع قوية للرؤوس الصغيرة
+        if row["rsi_6"] > 75 and row["rsi_14"] > 65:
+            sell_signals += 3
+        if row["close"] > row["bb_upper"] and row["rsi_6"] > 70:
+            sell_signals += 2
+        if row["macd_hist"] < 0 and row["macd"] < row["macd_signal"]:
+            sell_signals += 2
+        if row["stoch_k"] > 80 and row["stoch_d"] > 80:
+            sell_signals += 1
+        if row["momentum_3"] < -0.008 and row["volume_ratio"] > 1.2:
+            sell_signals += 2
+        
+        total_signals = buy_signals + sell_signals
+        if total_signals == 0:
+            return {"signal": "HOLD", "confidence": 0, "reason": "لا توجد إشارات"}
+        
+        confidence = (max(buy_signals, sell_signals) / total_signals) * 100
+        
+        if buy_signals >= 4 and confidence >= 65:
+            return {
+                "signal": "BUY", 
+                "confidence": confidence,
+                "reason": f"إشارات شراء قوية ({buy_signals}/8)"
             }
-            perf = self.simulate(klines, symbol, params)
-            score = perf['final_balance']
-            if best is None or score > best['score']:
-                best = {'score': score, 'params': params, 'perf': perf}
-        return best
+        elif sell_signals >= 4 and confidence >= 65:
+            return {
+                "signal": "SELL", 
+                "confidence": confidence,
+                "reason": f"إشارات بيع قوية ({sell_signals}/8)"
+            }
+        else:
+            return {
+                "signal": "HOLD", 
+                "confidence": confidence,
+                "reason": f"إشارات غير كافية (شراء: {buy_signals}, بيع: {sell_signals})"
+            }
+    
+    def micro_money_management(self, confidence: float, symbol: str) -> float:
+        """إدارة أموال ذكية للرؤوس الصغيرة"""
+        # قاعدة مخاطرة ديناميكية
+        base_risk = self.config.get("base_risk", 0.03)  # 3% أساسي
+        
+        # تعديل بناءً على الثقة
+        confidence_multiplier = confidence / 100.0
+        
+        # تعديل بناءً على الأداء
+        performance_multiplier = 1.0
+        if self.live_metrics['current_streak'] >= 2:
+            performance_multiplier = 1.3  # زيادة بعد صفقات رابحة
+        elif self.live_metrics['current_streak'] <= -1:
+            performance_multiplier = 0.7  # تقليل بعد خسائر
+        
+        risk_adjusted = base_risk * confidence_multiplier * performance_multiplier
+        
+        # حدود المخاطرة للرؤوس الصغيرة
+        max_risk = self.config.get("max_risk", 0.06)   # 6% أقصى
+        min_risk = self.config.get("min_risk", 0.015)  # 1.5% أدنى
+        
+        final_risk = np.clip(risk_adjusted, min_risk, max_risk)
+        
+        # حساب حجم المركز
+        position_size = self.balance * final_risk
+        
+        # حدود الصفقة للرؤوس الصغيرة
+        min_trade = self.config.get("min_trade", 0.20)  # 20 سنت أدنى صفقة
+        max_trade = self.config.get("max_trade", self.balance * 0.25)  # 25% كحد أقصى
+        
+        return np.clip(position_size, min_trade, max_trade)
+    
+    def instant_profit_compounding(self, profit: float):
+        """ربح تراكمي فوري بعد كل صفقة ناجحة"""
+        if profit > 0:
+            # إضافة الربح إلى الرصيد فوراً
+            old_balance = self.balance
+            self.balance += profit
+            
+            # تحديث الإحصائيات
+            self.live_metrics['total_profit'] += profit
+            self.live_metrics['winning_trades'] += 1
+            self.live_metrics['current_streak'] = max(self.live_metrics['current_streak'] + 1, 0)
+            self.live_metrics['max_streak'] = max(self.live_metrics['max_streak'], self.live_metrics['current_streak'])
+            
+            logger.info(f"💰 ربح تراكمي فوري: +${profit:.4f} | ${old_balance:.2f} → ${self.balance:.2f}")
+        else:
+            self.live_metrics['current_streak'] = min(self.live_metrics['current_streak'] - 1, 0)
+    
+    def run_micro_backtest(self, klines_data: Dict, timeframe: str):
+        """محاكاة مخصصة للرؤوس الصغيرة"""
+        results = {}
+        total_trades = 0
+        
+        logger.info(f"🚀 بدء المحاكاة المصغرة على {len(self.selected_pairs)} أزواج")
+        
+        for symbol in self.selected_pairs:
+            if symbol not in klines_data:
+                continue
+                
+            logger.info(f"🔍 تحليل {symbol}...")
+            df = klines_data[symbol].copy()
+            
+            if "timestamp" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+                df.set_index("timestamp", inplace=True)
+                
+            df = self.prepare_data(df)
+            df = self.add_fast_indicators(df)
+            
+            pair_trades = 0
+            
+            for i in range(20, len(df)):
+                # قرار التداول
+                signal_data = self.micro_signal_detection(df, i)
+                signal = signal_data["signal"]
+                confidence = signal_data["confidence"]
+                
+                price = float(df["close"].iloc[i])
+                ts = df.index[i]
+                
+                if signal in ["BUY", "SELL"] and confidence >= 65:
+                    position_size = self.micro_money_management(confidence, symbol)
+                    
+                    if signal == "BUY" and symbol not in self.positions:
+                        # فتح صفقة شراء
+                        qty = position_size / price
+                        self.positions[symbol] = {
+                            "entry_time": ts, 
+                            "entry_price": price, 
+                            "amount": position_size, 
+                            "qty": qty,
+                            "type": "LONG", 
+                            "confidence": confidence
+                        }
+                        self.balance -= position_size
+                        
+                        self.trade_history.append({
+                            "timestamp": ts, "symbol": symbol, "action": "BUY",
+                            "price": price, "amount": position_size, "qty": qty,
+                            "confidence": confidence, "status": "OPEN",
+                            "balance_before": self.balance + position_size,
+                            "balance_after": self.balance,
+                            "reason": signal_data["reason"]
+                        })
+                        pair_trades += 1
+                        total_trades += 1
+                        self.live_metrics['total_trades'] += 1
+                        
+                    elif signal == "SELL" and symbol in self.positions:
+                        # إغلاق صفقة شراء
+                        pos = self.positions.pop(symbol)
+                        profit = (price - pos["entry_price"]) * pos["qty"]
+                        
+                        # تطبيق الربح التراكمي الفوري
+                        self.instant_profit_compounding(profit)
+                        
+                        self.trade_history.append({
+                            "timestamp": ts, "symbol": symbol, "action": "SELL",
+                            "price": price, "amount": pos["amount"], "qty": pos["qty"],
+                            "profit": profit, "profit_pct": (profit / pos["amount"]) * 100,
+                            "confidence": pos["confidence"], "status": "CLOSED",
+                            "balance_before": self.balance,
+                            "balance_after": self.balance + profit,
+                            "reason": signal_data["reason"],
+                            "compounded": True
+                        })
+                        pair_trades += 1
+                        total_trades += 1
+            
+            # إغلاق المراكز المتبقية
+            if symbol in self.positions:
+                pos = self.positions.pop(symbol)
+                price = float(df["close"].iloc[-1])
+                profit = (price - pos["entry_price"]) * pos["qty"]
+                
+                self.instant_profit_compounding(profit)
+                
+                self.trade_history.append({
+                    "timestamp": df.index[-1], "symbol": symbol, "action": "SELL",
+                    "price": price, "amount": pos["amount"], "qty": pos["qty"],
+                    "profit": profit, "profit_pct": (profit / pos["amount"]) * 100,
+                    "confidence": pos["confidence"], "status": "CLOSED",
+                    "balance_before": self.balance,
+                    "balance_after": self.balance + profit,
+                    "reason": "إغلاق نهائي للمحاكاة",
+                    "compounded": True
+                })
+                total_trades += 1
+            
+            results[symbol] = {"trades": pair_trades}
+        
+        # النتائج النهائية
+        total_profit = self.balance - self.initial_balance
+        profit_percentage = (total_profit / self.initial_balance) * 100
+        
+        closed_trades = [t for t in self.trade_history if t.get('status') == 'CLOSED']
+        winning_trades = len([t for t in closed_trades if t.get('profit', 0) > 0])
+        win_rate = (winning_trades / len(closed_trades)) * 100 if closed_trades else 0
+        
+        logger.info(f"🎯 انتهت المحاكاة | الصفقات: {total_trades} | "
+                   f"الربح: ${total_profit:.2f} ({profit_percentage:.2f}%) | "
+                   f"معدل النجاح: {win_rate:.1f}%")
+        
+        return {
+            "final_balance": self.balance,
+            "total_profit": total_profit,
+            "profit_percentage": profit_percentage,
+            "total_trades": total_trades,
+            "win_rate": win_rate,
+            "trade_history": self.trade_history,
+            "initial_balance": self.initial_balance,
+            "live_metrics": self.live_metrics,
+            "compounding_effect": self.live_metrics['total_profit']
+        }
